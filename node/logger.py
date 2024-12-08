@@ -1,12 +1,15 @@
 import logging
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("app.log", mode='a')
-    ]
-)
 
 logger = logging.getLogger()
+
+def configure_logging(node_id):
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format=f'(node-{node_id}) - %(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S,%f',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(f'node-{node_id}.log', mode='a')
+        ]
+    )

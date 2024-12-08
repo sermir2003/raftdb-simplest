@@ -3,82 +3,110 @@ import os
 import threading
 from enum import Enum
 import random
-from broadcast import simple_broadcast
-import requests
-from logger import logger
 import sys
-from storage import Storage
+import requests
+from .broadcast import simple_broadcast
+from .logger import logger
+from .storage import Storage
 
 
 class NodeRole(Enum):
-        FOLLOWER = 0
-        CANDIDATE = 1
-        LEADER = 2
+    FOLLOWER = 0
+    CANDIDATE = 1
+    LEADER = 2
+
+
+class RaftElectionTimerInvoker:
+    def __init__(self, raft_node, config):
+        self.raft_node = raft_node
+        self.timeout_lower = config['election_timeout_lower']
+        self.timeout_upper = config['election_timeout_upper']
+        self.timer = threading.Timer(0, self.raft_node.start_elections)
+
+    def cancel(self):
+        self.timer.cancel()
+
+    def set(self):
+        timeout = random.uniform(self.timeout_lower, self.timeout_upper)
+        self.timer = threading.Timer(timeout, self.raft_node.start_elections)
+        self.timer.start()
+
+    def reset(self):
+        self.cancel()
+        self.set()
+
+
+class RaftReplicateLogTimerInvoker:
+    def __init__(self, raft_node, config):
+        self.raft_node = raft_node
+        self.timeout = config['replicate_log_timeout']
+        self.timer = threading.Timer(0, self.raft_node.replicate_log_mutex_wrapped)
+
+    def cancel(self):
+        self.timer.cancel()
+
+    def set(self):
+        self.timer = threading.Timer(self.timeout, self.raft_node.replicate_log_mutex_wrapped)
+        self.timer.start()
+
+    def reset(self):
+        self.cancel()
+        self.set()
 
 
 class RaftNode:
     def store_persistent_state(self):
         temp_file_path = f'node-{self.id}-tmp.txt'
-
         state = {
             'current_term': self.current_term,
             'voted_for': self.voted_for,
             'log': self.log
         }
-
-        with open(temp_file_path, 'w') as temp_file:
-            json.dump(state, file=temp_file)
-
+        with open(temp_file_path, 'w', encoding='utf-8') as temp_file:
+            json.dump(state, temp_file)
         os.replace(temp_file_path, self.persistent_file_path)
 
     def load_persistent_state(self):
         if os.path.isfile(self.persistent_file_path):
-            with open(self.persistent_file_path) as file:
+            with open(self.persistent_file_path, encoding='utf-8') as file:
                 state = json.load(file)
             self.current_term = state['current_term']
             self.voted_for = state['voted_for']
             self.log = state['log']
         else:
-            self.current_term = 0
-            self.voted_for = None
-            self.log = []
             self.store_persistent_state()
 
-    def load_config(self, config_path):
-        with open(config_path) as file:
+    def __init__(self, node_id, config_path):
+        self.id = node_id
+
+        random.seed(self.id)
+        self.persistent_file_path = f'mode-{self.id}-persistent.txt'
+        self.mutex = threading.Lock()
+
+        self.current_term = 0
+        self.voted_for = None
+        self.log = []
+        self.load_persistent_state()
+
+        with open(config_path, encoding='utf-8') as file:
             config = json.load(file)
         self.addresses = config['addresses']
         self.network_timeout = config['network_timeout']
-        self.election_timeout_lower = config['election_timeout_lower']
-        self.election_timeout_upper = config['election_timeout_upper']
 
-    def __init__(self, id, config_path):
-        self.id = id
-        random.seed(id)
-        self.persistent_file_path = f'mode-{self._id}-persistent.txt'
-        self.mutex = threading.Lock()
-        self.load_persistent_state()
-        self.load_config(config_path)
+        self.election_timer = RaftElectionTimerInvoker(self, config)
+        self.replicate_log_timer = RaftReplicateLogTimerInvoker(self, config)
+
         self.commit_length = 0
         self.current_role = NodeRole.FOLLOWER
         self.current_leader = None
         self.votes_received = set()
-        self.sent_length = dict()
-        self.acked_length = dict()
+
+        self.sent_length = {}
+        self.acked_length = {}
+
         self.storage = Storage(self.log)
-        self.set_election_timer()
+        self.election_timer.set()
         logger.info('ready to serve')
-
-    def reset_election_timer(self):
-        if hasattr(self, 'election_timer'):
-            self.election_timer.cancel()
-        timeout = random.uniform(self.election_timeout_lower, self.election_timeout_upper)
-        self.election_timer = threading.Timer(timeout, self.start_elections)
-        self.election_timer.start()
-
-    def cancel_election_timer(self):
-        if hasattr(self, 'election_timer'):
-            self.election_timer.cancel()
 
     def start_elections(self):
         # Called by timer, provide thread-safety
@@ -99,29 +127,19 @@ class RaftNode:
             }
             msg_list = [(node_address, msg) for node_id, node_address in self.addresses.items() if node_id != self.id]
             simple_broadcast(msg_list, self.network_timeout)
-            self.set_election_timer()
+            self.election_timer.reset()
             logger.debug('[+] start_elections')
 
-    def cancel_replicate_log_timer(self):
-        if hasattr(self, 'replicate_log_timer'):
-            self.replicate_log_timer.cancel()
-
-    def set_replicate_log_timer(self):
-        timeout = self.replicate_log_timeout
-        self.replicate_log_timer = threading.Timer(timeout, self.replicate_log_wrapped)
-        self.replicate_log_timer.start()
-
     def start_leadership(self):
+        self.election_timer.cancel()
         self.current_role = NodeRole.LEADER
         self.current_leader = self.id
-        self.cancel_election_timer()
         self.sent_length = {node_id: len(self.log) for node_id in self.addresses.keys()}
         self.acked_length = {node_id: 0 for node_id in self.addresses.keys()}
         self.replicate_log()
 
-
     def replicate_log(self):
-        self.cancel_replicate_log_timer()
+        self.replicate_log_timer.cancel()
         if self.current_role != NodeRole.LEADER:
             return
         msg_list = []
@@ -142,9 +160,10 @@ class RaftNode:
             }
             msg_list.append((node_address, msg))
         simple_broadcast(msg_list, self.network_timeout)
-        self.set_replicate_log_timer()
+        self.replicate_log_timer.set()
 
-    def replicate_log_wrapped(self):
+    def replicate_log_mutex_wrapped(self):
+        # Called by timer, provide thread-safety
         with self.mutex:
             self.replicate_log()
 
@@ -218,9 +237,6 @@ class RaftNode:
             logger.debug('    Received a vote in support')
             self.votes_received.add(voter_id)
             if len(self.votes_received) >= len(self.addresses) // 2 + 1:
-                self.current_role = NodeRole.LEADER
-                self.current_leader = self.id
-                self.election_timer.cancel()
                 logger.debug('    Was elected as leader')
                 self.start_leadership()
         elif self.current_term < term:
@@ -228,7 +244,7 @@ class RaftNode:
             self.voted_for = None
             self.store_persistent_state()
             self.current_role = NodeRole.FOLLOWER
-            self.election_timer.cancel()
+            self.election_timer.reset()
             logger.debug('    Received newer term, become follower')
         else:
             logger.debug('    Received garbage message')
@@ -241,10 +257,12 @@ class RaftNode:
             self.voted_for = None
             self.store_persistent_state()
             self.current_role = NodeRole.FOLLOWER
+            self.election_timer.reset()
             self.current_leader = leader_id
             logger.debug(f'    From obsolete term became a follower of {leader_id}')
         if self.current_term == term and self.current_role == NodeRole.CANDIDATE:
             self.current_role = NodeRole.FOLLOWER
+            self.election_timer.reset()
             self.current_leader = leader_id
             logger.debug(f'    From candidate become a follower of {leader_id} in the same term {term}')
         log_ok = len(self.log) >= log_length and \
@@ -253,11 +271,11 @@ class RaftNode:
             self.append_entries(log_length, leader_commit, entries)
             ack = log_length + len(entries)
             success = True
-            logger.debug(f'    Succeed')
+            logger.debug('    Succeed')
         else:
             ack = 0
             success = False
-            logger.debug(f'    Failed')
+            logger.debug('    Failed')
         requests.post(
             url=f'http://{self.addresses[leader_id]}/raft_control',
             json={
@@ -286,6 +304,7 @@ class RaftNode:
         elif self.current_term < term:
             self.current_term = term
             self.current_role = NodeRole.FOLLOWER
+            self.election_timer.reset()
             self.voted_for = None
         logger.debug('[+] on_log_response')
 
@@ -303,20 +322,16 @@ class RaftNode:
                 self.replicate_log()
                 logger.debug('[+] on_change_request, change has accepted')
                 return {'message': 'ok'}
-            elif self.current_leader is not None:
+            if self.current_leader is not None:
                 logger.debug(f'[+] on_change_request, redirecting to node {self.current_leader}')
-                return {'message': 'redirect', 'url': f'http://{self.address(self.current_leader)}'}
-            else:
-                logger.debug('[+] on_change_request, Do not know who is Mr Leader')
-                return {'message': 'Do not know who is Mr Leader'}
+                return {'message': 'redirect', 'url': f'http://{self.addresses(self.current_leader)}'}
+            logger.debug('[+] on_change_request, Do not know who is Mr Leader')
+            return {'message': 'Do not know who is Mr Leader'}
 
     def on_read_request(self, key):
         # Called by http server, provide thread-safety
         with self.mutex:
-            logger.debug('[.] on_read_request')
-            value = self.storage.get(key, None)
-            logger.debug('[+] on_read_request')
-            return value
+            return self.storage.read(key)
 
     def append_entries(self, log_length, leader_commit, entries):
         logger.debug('[.] append_entries')

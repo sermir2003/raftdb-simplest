@@ -11,11 +11,10 @@ def create_app(raft_node):
     @app.route('/items/<string:key>', methods=['PUT'])
     def create(key):
         try:
-            data = request.get_json()
             result = g.raft_node.on_change_request({
                 'type': 'create',
                 'key': key,
-                'value': data['value'],
+                'value': request.get_json()['value'],
             })
             if result['message'] == 'ok':
                 return jsonify({'message': 'ok'}), 200
@@ -33,14 +32,13 @@ def create_app(raft_node):
         except Exception as e:
             return jsonify({'message': str(e)}), 500
 
-    @app.route('/items/<string:key>', methods=['PATCH'])
+    @app.route('/items/<string:key>', methods=['POST'])
     def update(key):
         try:
-            data = request.get_json()
             result = g.raft_node.on_change_request({
                 'type': 'update',
                 'key': key,
-                'value': data['value'],
+                'value': request.get_json()['value'],
             })
             if result['message'] == 'ok':
                 return jsonify({'message': 'ok'}), 200
@@ -54,7 +52,6 @@ def create_app(raft_node):
     @app.route('/items/<string:key>', methods=['DELETE'])
     def delete(key):
         try:
-            data = request.get_json()
             result = g.raft_node.on_change_request({
                 'type': 'delete',
                 'key': key,
