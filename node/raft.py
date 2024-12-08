@@ -56,7 +56,7 @@ class RaftReplicateLogTimerInvoker:
 
 class RaftNode:
     def store_persistent_state(self):
-        temp_file_path = f'node-{self.id}-tmp.txt'
+        temp_file_path = f'{self.id}-tmp.txt'
         state = {
             'current_term': self.current_term,
             'voted_for': self.voted_for,
@@ -80,7 +80,7 @@ class RaftNode:
         self.id = node_id
 
         random.seed(self.id)
-        self.persistent_file_path = f'mode-{self.id}-persistent.txt'
+        self.persistent_file_path = f'{self.id}-persistent.txt'
         self.mutex = threading.Lock()
 
         self.current_term = 0

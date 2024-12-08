@@ -1,0 +1,11 @@
+{
+    "addresses": {
+        "node-0": "localhost:5000",
+        "node-1": "localhost:5001",
+        "node-2": "localhost:5002"
+    },
+    "network_timeout": 0.5,
+    "election_timeout_lower": 5,
+    "election_timeout_upper": 10,
+    "replicate_log_timeout": 1
+}
