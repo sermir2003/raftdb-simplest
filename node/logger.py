@@ -10,6 +10,6 @@ def configure_logging(node_id):
         datefmt='%H:%M:%S,%f',
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(f'node-{node_id}.log', mode='a')
+            logging.FileHandler(f'{node_id}.log', mode='a')
         ]
     )

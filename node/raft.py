@@ -25,10 +25,12 @@ class RaftElectionTimerInvoker:
 
     def cancel(self):
         self.timer.cancel()
+        logger.debug('canceled election timer')
 
     def set(self):
         timeout = random.uniform(self.timeout_lower, self.timeout_upper)
         self.timer = threading.Timer(timeout, self.raft_node.start_elections)
+        logger.debug(f'set election timer to {timeout}')
         self.timer.start()
 
     def reset(self):
@@ -44,9 +46,11 @@ class RaftReplicateLogTimerInvoker:
 
     def cancel(self):
         self.timer.cancel()
+        logger.debug('canceled replicate log timer')
 
     def set(self):
         self.timer = threading.Timer(self.timeout, self.raft_node.replicate_log_mutex_wrapped)
+        logger.debug(f'set replicate log timer to {self.timeout}')
         self.timer.start()
 
     def reset(self):
@@ -55,7 +59,7 @@ class RaftReplicateLogTimerInvoker:
 
 
 class RaftNode:
-    def store_persistent_state(self):
+    def store_persistent_state(self, called_from):
         temp_file_path = f'{self.id}-tmp.txt'
         state = {
             'current_term': self.current_term,
@@ -65,6 +69,7 @@ class RaftNode:
         with open(temp_file_path, 'w', encoding='utf-8') as temp_file:
             json.dump(state, temp_file)
         os.replace(temp_file_path, self.persistent_file_path)
+        logger.debug(f'stored state in {called_from}: {state}')
 
     def load_persistent_state(self):
         if os.path.isfile(self.persistent_file_path):
@@ -73,10 +78,12 @@ class RaftNode:
             self.current_term = state['current_term']
             self.voted_for = state['voted_for']
             self.log = state['log']
+            logger.debug(f'loaded state: {state}')
         else:
-            self.store_persistent_state()
+            logger.debug('did not find the save file, created a new one with default values')
+            self.store_persistent_state('load_persistent_state')
 
-    def __init__(self, node_id, config_path):
+    def __init__(self, node_id, config):
         self.id = node_id
 
         random.seed(self.id)
@@ -88,8 +95,6 @@ class RaftNode:
         self.log = []
         self.load_persistent_state()
 
-        with open(config_path, encoding='utf-8') as file:
-            config = json.load(file)
         self.addresses = config['addresses']
         self.network_timeout = config['network_timeout']
 
@@ -106,7 +111,7 @@ class RaftNode:
 
         self.storage = Storage(self.log)
         self.election_timer.set()
-        logger.info('ready to serve')
+        logger.info('node has started')
 
     def start_elections(self):
         # Called by timer, provide thread-safety
@@ -115,7 +120,7 @@ class RaftNode:
             self.current_role = NodeRole.CANDIDATE
             self.current_term += 1
             self.voted_for = self.id
-            self.store_persistent_state()
+            self.store_persistent_state('start_elections')
             self.votes_received = {self.id}
             last_term = self.log[-1]['term'] if len(self.log) > 0 else 0
             msg = {
@@ -170,7 +175,7 @@ class RaftNode:
     def manage_control_request(self, data):
         # Called by http server, provide thread-safety
         with self.mutex:
-            logger.debug('[.] manage_control_request')
+            logger.debug(f'[.] manage_control_request msg: {data}')
             if data['msg_type'] == 'VoteRequest':
                 self.on_vote_request(
                     other_id=data['node_id'],
@@ -213,7 +218,7 @@ class RaftNode:
             self.current_term = other_term
             self.current_role = NodeRole.FOLLOWER
             self.voted_for = other_id
-            self.store_persistent_state()
+            self.store_persistent_state('on_vote_request')
             granted = True
             logger.debug('    success')
         else:
@@ -242,7 +247,7 @@ class RaftNode:
         elif self.current_term < term:
             self.current_term = term
             self.voted_for = None
-            self.store_persistent_state()
+            self.store_persistent_state('on_vote_response')
             self.current_role = NodeRole.FOLLOWER
             self.election_timer.reset()
             logger.debug('    Received newer term, become follower')
@@ -255,7 +260,7 @@ class RaftNode:
         if self.current_term < term:
             self.current_term = term
             self.voted_for = None
-            self.store_persistent_state()
+            self.store_persistent_state('on_log_request')
             self.current_role = NodeRole.FOLLOWER
             self.election_timer.reset()
             self.current_leader = leader_id
@@ -317,7 +322,7 @@ class RaftNode:
                     'term': self.current_term,
                     'change': change
                 })
-                self.store_persistent_state()
+                self.store_persistent_state('on_change_request')
                 self.acked_length[self.id] = len(self.log)
                 self.replicate_log()
                 logger.debug('[+] on_change_request, change has accepted')
@@ -345,7 +350,7 @@ class RaftNode:
             change = self.log[self.commit_length]
             self.storage.apply(change)
             self.commit_length += 1
-        self.store_persistent_state()
+        self.store_persistent_state('append_entries')
         logger.debug('[+] append_entries')
 
     def commit_log_entries(self):
@@ -360,6 +365,6 @@ class RaftNode:
                 self.storage.apply(change)
                 self.commit_length += 1
             else:
-                self.store_persistent_state()
+                self.store_persistent_state('commit_log_entries')
                 logger.debug('[+] commit_log_entries')
                 break
