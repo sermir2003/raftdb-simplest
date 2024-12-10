@@ -1,47 +1,41 @@
 import sys
-from .logger import logger
+from logger import logger
 
 
 class Storage:
-    def __init__(self, changelog):
-        self._table = dict()
+    def __init__(self, changelog: list[dict[str, any]]):
+        self._table: dict[str, any] = {}
         for entry in changelog:
-            _ = self.apply(entry)
+            _ = self.apply(entry['change'])
 
-    def apply(self, operation):
-        if operation['type'] == 'create':
-            key = operation['key']
+    def apply(self, change):
+        key = change['key']
+        if change['type'] == 'create':
             if key in self._table:
-                return {'message': 'already exists'}
-            self._table[key] = operation['value']
-            return {'message': 'ok'}
-        if operation['type'] == 'read':
-            key = operation['key']
+                return {'status': 'already exists', 'value': self._table[key]}
+            self._table[key] = change['value']
+            return {'status': 'successfully created'}
+        if change['type'] == 'read':
             if key in self._table:
-                return {'message': 'ok', 'value': self._table[key]}
-            return {'message': 'not found'}
-        if operation['type'] == 'update':
-            key = operation['key']
+                return {'status': 'successfully read', 'value': self._table}
+            return {'status': 'did not exist'}
+        if change['type'] == 'update':
             if key in self._table:
-                self._table[key] = operation['value']
-                return {'message': 'ok'}
-            return {'message': 'does not exist'}
-        if operation['type'] == 'delete':
-            key = operation['key']
+                self._table[key] = change['value']
+                return {'status': 'successfully updated'}
+            return {'status': 'did not exist'}
+        if change['type'] == 'delete':
             if key in self._table:
                 self._table.pop(key)
-                return {'message': 'ok'}
-            return {'message': 'not found'}
-        if operation['type'] == 'cas':
-            key = operation['key']
-            if key in self._table:
-                if self._table[key] == operation['expected']:
-                    self._table[key] = operation['desired']
-                    return {'message': 'ok'}
-                return {'message': 'unsuccessful cas', 'actual': self._table[key]}
-            return {'message': 'not found'}
-        logger.fatal(f'Unknown operation type: {operation['type']}')
+                return {'status': 'successfully deleted'}
+            return {'status': 'did not exist'}
+        if change['type'] == 'cas':
+            # Even works with (key not in _table) and with (expected is null)
+            expected = change['expected']
+            desired = change['desired']
+            if self._table.get(key, None) == expected:
+                self._table[key] = desired
+                return {'status': 'successfully exchanged'}
+            return {'status': 'actual and desired value did not match', 'actual': self._table.get(key, None)}
+        logger.fatal(f'apply method has not returned anything, change: {change}')
         sys.exit(1)
-
-    def read(self, key):
-        return self._table.get(key, None)
