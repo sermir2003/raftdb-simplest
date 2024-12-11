@@ -1,6 +1,6 @@
 from typing import Callable, Awaitable
 import asyncio
-from logger import logger
+from .logger import logger
 
 
 class AsyncTimer:
@@ -17,26 +17,29 @@ class AsyncTimer:
 
     async def _run(self):
         """Private method to wait for the delay and call the callback."""
+        delay = self._get_delay()
+        logger.info(f'timer "{self._timer_name}" set to {delay} seconds')
         try:
-            delay = self._get_delay()
-            logger.debug(f'timer {self._timer_name} set to {delay} seconds')
-            await asyncio.sleep(delay)  # Wait for the delay
-            await self._callback()  # Call the async callback
-        except asyncio.CancelledError:
-            # Handle timer cancellation
-            pass
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:  # Handle timer cancellation
+            self._task = None
+            return
+        self._task = None
+        await self._callback()
 
     def start(self):
         """Start the timer."""
-        if self._task is None:  # Avoid restarting if already running
-            self._task = asyncio.create_task(self._run())
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(self._run())
 
     def cancel(self):
         """Cancel the timer."""
-        if self._task:
-            self._task.cancel()
-            self._task = None
-        logger.debug(f'timer {self._timer_name} cancelled')
+        if self._task is None:
+            return
+        self._task.cancel()
+        self._task = None
+        logger.debug(f'timer "{self._timer_name}" cancelled')
 
     def restart(self):
         """Restart the timer."""
