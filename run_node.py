@@ -9,15 +9,15 @@ import click
 def main(node_id):
     config = 'config.json'
     config_absolute_path = os.path.abspath(config)
-    with open(config, encoding='utf-8') as file:
-        config_json = json.load(file)
-    port = config_json['addresses'][node_id].split(':')[-1]
+    # with open(config, encoding='utf-8') as file:
+    #     config_json = json.load(file)
+    # port = config_json['addresses'][node_id].split(':')[-1]
     current_location = os.path.dirname(os.path.abspath(__file__))
     folder_on_host = current_location + '/' + node_id
     os.makedirs(folder_on_host, exist_ok=True)
     args = ["docker", "run",
             "--rm",
-            "-p", f"{port}:{port}",
+            # "-p", f"{port}:{port}",
             "-v", f"{config_absolute_path}:/app/config.json",
             "-v", f"{folder_on_host}:/app/{node_id}",
             "--name", node_id,

@@ -20,7 +20,7 @@ class NodeRole(Enum):
 
 
 class Node:
-    def store_persistent_state(self, called_from: str):
+    def store_persistent_state(self):
         temp_file_path = f'{self.node_id}/tmp.txt'
         state = {
             'current_term': self.current_term,
@@ -30,7 +30,7 @@ class Node:
         with open(temp_file_path, 'w', encoding='utf-8') as temp_file:
             json.dump(state, temp_file)
         os.replace(temp_file_path, self.persistent_file_path)
-        logger.info(f'from "{called_from}" called store persistent state: {state}')
+        logger.info(f'stored persistent state: {state}')
 
     def load_persistent_state(self):
         if os.path.isfile(self.persistent_file_path):
@@ -42,7 +42,7 @@ class Node:
             logger.info(f'loaded state: {state}')
         else:
             logger.info('did not find saved persistent state, created default')
-            self.store_persistent_state('load_persistent_state')
+            self.store_persistent_state()
 
     def __init__(self, node_id: str, config_path: str):
         self.node_id: str = node_id
@@ -96,7 +96,7 @@ class Node:
         _ = app
         asyncio.create_task(self.background_election_supervision())
         asyncio.create_task(self.background_replication_supervision())
-        logger.info('node has initialized and ready to accept requests')
+        logger.info('node is initialized and ready to accept requests')
         yield
         logger.info('shutting down the server')
         sys.exit(0)
@@ -202,7 +202,7 @@ class Node:
 
     async def make_operation(self, operation: dict[str, any]):
         self.log.append({'term': self.current_term, 'operation': operation})
-        self.store_persistent_state('make_operation')
+        self.store_persistent_state()
         self.acked_length[self.node_id] = len(self.log)
         operation_index = len(self.log) - 1
         self.state_of_operation[operation_index] = {'event': asyncio.Event()}
@@ -223,14 +223,14 @@ class Node:
             if cnt_acks >= len(self.addresses) // 2 + 1:
                 operation = self.log[self.commit_length]['operation']
                 result = self.storage.apply(operation)
-                logger.info(f'leader applied operation: {operation} and received result: {result}')
+                logger.info(f'leader applied operation: {operation}, index: {self.commit_length} and received result: {result}')
                 if self.commit_length in self.state_of_operation:
                     self.state_of_operation[self.commit_length]['result'] = result
                     self.state_of_operation[self.commit_length]['event'].set()
                 self.commit_length += 1
 
     async def async_broadcast(self, requests: list[tuple[str, dict]], method: str):
-        logger.info(f'starting the broadcast with requests: {requests}')
+        logger.info(f'starting {method} broadcast with requests: {requests}')
         async with httpx.AsyncClient() as client:
             responses = []
             failures = []
@@ -252,16 +252,17 @@ class Node:
             try:
                 results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=self.network_timeout)
             except asyncio.TimeoutError:
-                logger.debug(f'common timeout reached when broadcasting {method}')
+                logger.info(f'common timeout reached when broadcasting {method}')
+                results = []
 
         for result in results:
             if result['status'] == 'success':
                 responses.append(result['response'])
             else:
                 failures.append(result)
-        logger.info(f'{method} broadcast has ended, received'
-                    f' {len(responses)} responses: {responses}'
-                    f' and {len(failures)} failures: {failures}')
+        logger.info(f'{method} broadcast has ended, received {len(responses)} '
+                    f'responses: {responses} and '
+                    f'{len(failures)} failures: {failures}')
         return responses, failures
 
     async def background_election_supervision(self):
@@ -271,12 +272,12 @@ class Node:
             seconds_since_last_heard = (datetime.now() - self.last_heard_from_leader_at).total_seconds()
             if self.current_role == NodeRole.LEADER or seconds_since_last_heard < 3 * self.leader_heart_rate:
                 continue
-            logger.info('I suspect the leader is unavailable')
+            logger.info(f'I suspect the leader is unavailable, trying to become a leader in term {self.current_term + 1}')
             self.current_role = NodeRole.CANDIDATE
             self.current_leader = None
             self.current_term += 1
             self.voted_for = self.node_id
-            self.store_persistent_state('perform_election begin')
+            self.store_persistent_state()
             self.votes_received = {self.node_id}
             last_term = self.log[-1]['term'] if len(self.log) > 0 else 0
             message = {
@@ -305,11 +306,11 @@ class Node:
                 elif self.current_term < term:
                     self.current_term = term
                     self.voted_for = None
-                    self.store_persistent_state('perform_election received bigger term')
-                    logger.info(f'received newer {term}, become follower')
+                    self.store_persistent_state()
+                    logger.info(f'received vote response with newer {term}, become follower of unknown leader')
                     self.current_role = NodeRole.FOLLOWER
                 else:
-                    logger.debug(f'received garbage message: {response}')
+                    logger.info(f'received a garbage message as a vote response: {response}')
 
     async def raft_vote_request(self, request: fastapi.Request):
         message = await request.json()
@@ -324,19 +325,24 @@ class Node:
         term_ok = other_term > self.current_term or \
             other_term == self.current_term and self.voted_for in {None, other_id}
         if log_ok and term_ok:
+            logger.info('decided to vote in support')
             self.current_term = other_term
             self.voted_for = other_id
-            self.store_persistent_state('raft_vote_request')
+            self.store_persistent_state()
             self.current_role = NodeRole.FOLLOWER
             granted = True
         else:
+            logger.info('decided to reject the vote request: '
+                        f'log_ok: {log_ok}, other_log_term: {other_log_term}, self_log_term: {self_log_term}, '
+                        f'other_log_length: {other_log_length}, len(self.log): {len(self.log)}, '
+                        f'term_ok: {term_ok}, self.voted_for: {self.voted_for}')
             granted = False
         reply = {'node_id': self.node_id, 'term': self.current_term, 'granted': granted}
         logger.info(f'reply: {reply}')
         return reply
 
     async def start_leadership(self):
-        logger.info(f'I am the leader in term {self.current_term}')
+        logger.info(f'I am the leader in the term {self.current_term}')
         self.current_role = NodeRole.LEADER
         self.current_leader = self.node_id
         self.sent_length = {node_id: len(self.log) for node_id in self.addresses.keys()}
@@ -380,17 +386,30 @@ class Node:
                 success = response['success']
                 if term == self.current_term and self.current_role == NodeRole.LEADER:
                     if success:  # do I need (and ack >= self.acked_length[follower_id]) here?
+                        logger.info(f'received positive replicate log response from {follower_id} with ack: {ack}; '
+                                    f'previous follower sent_length: {self.sent_length[follower_id]}, '
+                                    f'previous follower acked_length: { self.acked_length[follower_id]}')
                         assert ack >= self.acked_length[follower_id]
                         self.sent_length[follower_id] = ack
                         self.acked_length[follower_id] = ack
                         self.commit_log_on_leader()
                     elif self.sent_length[follower_id] > 0:
+                        logger.info(f'received negative replicate log response from {follower_id}, '
+                                    'decrementing sent_length; '
+                                    f'previous follower sent_length: {self.sent_length[follower_id]}, '
+                                    f'previous follower acked_length: { self.acked_length[follower_id]}')
                         self.sent_length[follower_id] -= 1
-                        await self.perform_replication()
+                        asyncio.create_task(self.perform_replication())
+                    else:
+                        logger.info(f'received negative replicate log response from {follower_id}, '
+                                    'but its sent_length is already zero; '
+                                    f'follower sent_length: {self.sent_length[follower_id]}, '
+                                    f'follower acked_length: { self.acked_length[follower_id]}')
                 elif self.current_term < term:
                     self.current_term = term
                     self.voted_for = None
-                    self.store_persistent_state('perform_replication')
+                    logger.info(f'received replicate log response with newer term {term}, become follower of unknown leader')
+                    self.store_persistent_state()
                     self.current_role = NodeRole.FOLLOWER
 
     async def raft_replicate_request(self, request: fastapi.Request):
@@ -405,23 +424,28 @@ class Node:
         if self.current_term < term:
             self.current_term = term
             self.voted_for = None
-            self.store_persistent_state('raft_replicate_request')
+            self.store_persistent_state()
             self.current_role = NodeRole.FOLLOWER
             self.current_leader = leader_id
-            logger.debug(f'became a follower of {leader_id} in term {term}')
+            logger.info(f'became a follower of {leader_id} in term {term}')
         if self.current_term == term:
             self.current_role = NodeRole.FOLLOWER
             self.current_leader = leader_id
-            logger.debug(f'became a follower of {leader_id} in term {term}')
+            logger.info(f'became a follower of {leader_id} in term {term}')
         if self.current_term == term and self.current_leader == leader_id:
             self.last_heard_from_leader_at = datetime.now()
+            logger.info(f'reset last_heard_from_leader_at to {self.last_heard_from_leader_at}')
         log_ok = len(self.log) >= log_length and \
             (log_length == 0 or log_term == self.log[log_length - 1]['term'])
         if term == self.current_term and log_ok:
+            logger.info(f'decided that it is success replicate log request; '
+                        f'log: {self.log}')
             self.append_entries(log_length, leader_commit, entries)
             ack = log_length + len(entries)
             success = True
         else:
+            logger.info(f'decided that it is unsuccess replicate log request; '
+                        f'self.current_term: {self.current_term}, log: {self.log}')
             ack = 0
             success = False
         reply = {'node_id': self.node_id, 'term': self.current_term, 'ack': ack, 'success': success}
@@ -432,8 +456,16 @@ class Node:
         if len(entries) > 0 and len(self.log) > log_length:
             if self.log[log_length]['term'] != entries[0]['term']:
                 self.log = self.log[:log_length]
+                logger.info(f'append_entries: truncated log: {self.log}')
+            else:
+                logger.info(f'append_entries: did not truncate, however it is long; log: {self.log}')
+        else:
+            logger.info(f'append_entries: self.log is not longer log_length or len(entries) equals zero')
         if len(self.log) < log_length + len(entries):
             self.log += entries[len(self.log) - log_length:]
+            logger.info(f'append_entries: appended entries; log: {self.log}')
+        else:
+            logger.info(f'append_entries: did not appended entries; log: {self.log}')
         while self.commit_length < leader_commit:
             operation = self.log[self.commit_length]['operation']
             result = self.storage.apply(operation)
