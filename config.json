@@ -1,13 +1,13 @@
 {
     "addresses": {
-        "node-1": "localhost:8001",
-        "node-2": "localhost:8002",
-        "node-3": "localhost:8003"
+        "node-1": "node-1:5000",
+        "node-2": "node-2:5000",
+        "node-3": "node-3:5000"
     },
     "network_timeout": 0.5,
     "relieved_read": true,
     "client_request_timeout": 10,
-    "election_delay_lower": 5,
+    "election_delay_lower": 1,
     "election_delay_upper": 10,
     "leader_heart_rate": 1
 }

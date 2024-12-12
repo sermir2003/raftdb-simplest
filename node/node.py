@@ -21,7 +21,7 @@ class NodeRole(Enum):
 
 class Node:
     def store_persistent_state(self, called_from: str):
-        temp_file_path = f'{self.node_id}-tmp.txt'
+        temp_file_path = f'{self.node_id}/tmp.txt'
         state = {
             'current_term': self.current_term,
             'voted_for': self.voted_for,
@@ -47,7 +47,7 @@ class Node:
     def __init__(self, node_id: str, config_path: str):
         self.node_id: str = node_id
 
-        self.persistent_file_path: str = f'{self.node_id}-persistent.txt'
+        self.persistent_file_path: str = f'{self.node_id}/persistent.txt'
         hashed_node_id = hashlib.sha256(self.node_id.encode('utf-8')).hexdigest()
         random.seed(hashed_node_id)
 
@@ -75,7 +75,7 @@ class Node:
 
         self.sent_length: dict[str, int] = {}
         self.acked_length: dict[str, int] = {}
-        self.state_of_change: dict[int, dict] = {}
+        self.state_of_operation: dict[int, dict] = {}
 
         self.storage = Storage(self.log)
 
@@ -115,12 +115,12 @@ class Node:
             value = data.get("value")
             if value is None:
                 raise fastapi.HTTPException(status_code=400, detail="Missing 'value' in request body")
-            change = {
+            operation = {
                 'type': 'create',
                 'key': key,
                 'value': value,
             }
-            return await self.make_change(change)
+            return await self.make_operation(operation)
         if self.current_leader is not None:
             return fastapi.responses.RedirectResponse(
                 url=f'http://{self.addresses[self.current_leader]}/items/{key}',
@@ -128,16 +128,16 @@ class Node:
         return {'status': 'I do not know who is the leader now'}
 
     async def read_item(self, key: str):
-        change = {
+        operation = {
             'type': 'read',
             'key': key,
         }
         if self.relieved_read:
             logger.info(f'read request is handling in relieved manner, key: {key}')
-            return self.storage.apply(change)
+            return self.storage.apply(operation)
         if self.current_role == NodeRole.LEADER:
             logger.info(f'read request is handling by leader, key: {key}')
-            return await self.make_change(change)
+            return await self.make_operation(operation)
         if self.current_leader is not None:
             return fastapi.responses.RedirectResponse(
                 url=f'http://{self.addresses[self.current_leader]}/items/{key}',
@@ -151,12 +151,12 @@ class Node:
             value = data.get("value")
             if value is None:
                 raise fastapi.HTTPException(status_code=400, detail="Missing 'value' in request body")
-            change = {
+            operation = {
                 'type': 'update',
                 'key': key,
                 'value': value,
             }
-            return await self.make_change(change)
+            return await self.make_operation(operation)
         if self.current_leader is not None:
             return fastapi.responses.RedirectResponse(
                 url=f'http://{self.addresses[self.current_leader]}/items/{key}',
@@ -166,11 +166,11 @@ class Node:
     async def delete_item(self, key: str):
         if self.current_role == NodeRole.LEADER:
             logger.info(f'delete request is handling by leader, key: {key}')
-            change = {
+            operation = {
                 'type': 'delete',
                 'key': key,
             }
-            return await self.make_change(change)
+            return await self.make_operation(operation)
         if self.current_leader is not None:
             return fastapi.responses.RedirectResponse(
                 url=f'http://{self.addresses[self.current_leader]}/items/{key}',
@@ -187,32 +187,32 @@ class Node:
             if 'desired' not in data:
                 raise fastapi.HTTPException(status_code=400, detail="Missing 'desired' in request body")
             desired = data.get("desired")
-            change = {
+            operation = {
                 'type': 'cas',
                 'key': key,
                 'expected': expected,
                 'desired': desired,
             }
-            return await self.make_change(change)
+            return await self.make_operation(operation)
         if self.current_leader is not None:
             return fastapi.responses.RedirectResponse(
                 url=f'http://{self.addresses[self.current_leader]}/items/{key}/cas',
                 status_code=307)
         return {'status': 'I do not know who is the leader now'}
 
-    async def make_change(self, change: dict[str, any]):
-        self.log.append({'term': self.current_term, 'change': change})
-        self.store_persistent_state('make_change')
+    async def make_operation(self, operation: dict[str, any]):
+        self.log.append({'term': self.current_term, 'operation': operation})
+        self.store_persistent_state('make_operation')
         self.acked_length[self.node_id] = len(self.log)
-        change_index = len(self.log) - 1
-        self.state_of_change[change_index] = {'event': asyncio.Event()}
+        operation_index = len(self.log) - 1
+        self.state_of_operation[operation_index] = {'event': asyncio.Event()}
         try:
             await asyncio.wait_for(self.perform_replication(), timeout=self.client_request_timeout)
-            await asyncio.wait_for(self.state_of_change[change_index]['event'].wait(),
+            await asyncio.wait_for(self.state_of_operation[operation_index]['event'].wait(),
                                    timeout=self.client_request_timeout)
-            return self.state_of_change[change_index]['result']
+            return self.state_of_operation[operation_index]['result']
         except asyncio.TimeoutError:
-            return {'status': 'the change request timeout has expired on the server'}
+            return {'status': 'the operation request timeout has expired on the server'}
 
     def commit_log_on_leader(self):
         while self.commit_length < len(self.log):
@@ -221,12 +221,12 @@ class Node:
                 if self.acked_length[node_id] > self.commit_length:
                     cnt_acks += 1
             if cnt_acks >= len(self.addresses) // 2 + 1:
-                change = self.log[self.commit_length]['change']
-                result = self.storage.apply(change)
-                logger.info(f'leader applied change: {change} and received result: {result}')
-                if self.commit_length in self.state_of_change:
-                    self.state_of_change[self.commit_length]['result'] = result
-                    self.state_of_change[self.commit_length]['event'].set()
+                operation = self.log[self.commit_length]['operation']
+                result = self.storage.apply(operation)
+                logger.info(f'leader applied operation: {operation} and received result: {result}')
+                if self.commit_length in self.state_of_operation:
+                    self.state_of_operation[self.commit_length]['result'] = result
+                    self.state_of_operation[self.commit_length]['event'].set()
                 self.commit_length += 1
 
     async def async_broadcast(self, requests: list[tuple[str, dict]], method: str):
@@ -269,7 +269,7 @@ class Node:
             delay = random.uniform(self.election_delay_lower, self.election_delay_upper)
             await asyncio.sleep(delay)
             seconds_since_last_heard = (datetime.now() - self.last_heard_from_leader_at).total_seconds()
-            if self.current_role == NodeRole.LEADER or seconds_since_last_heard < 4 * self.leader_heart_rate:
+            if self.current_role == NodeRole.LEADER or seconds_since_last_heard < 3 * self.leader_heart_rate:
                 continue
             logger.info('I suspect the leader is unavailable')
             self.current_role = NodeRole.CANDIDATE
@@ -342,7 +342,7 @@ class Node:
         self.sent_length = {node_id: len(self.log) for node_id in self.addresses.keys()}
         self.acked_length = {node_id: 0 for node_id in self.addresses.keys()}
         self.acked_length[self.node_id] = len(self.log)
-        self.state_of_change = {}
+        self.state_of_operation = {}
         await self.perform_replication()
 
     async def background_replication_supervision(self):
@@ -435,7 +435,7 @@ class Node:
         if len(self.log) < log_length + len(entries):
             self.log += entries[len(self.log) - log_length:]
         while self.commit_length < leader_commit:
-            change = self.log[self.commit_length]['change']
-            result = self.storage.apply(change)
-            logger.info(f'follower applied change: {change} and received result: {result}')
+            operation = self.log[self.commit_length]['operation']
+            result = self.storage.apply(operation)
+            logger.info(f'follower applied operation: {operation} and received result: {result}')
             self.commit_length += 1

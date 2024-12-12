@@ -1,3 +1,4 @@
+import os
 import click
 from .node import Node
 from .logger import configure_logger
@@ -8,6 +9,7 @@ from .logger import configure_logger
 @click.option('--config', required=True, help='The path to the configuration file of this Raft node',
               type=click.Path(exists=True, file_okay=True, dir_okay=False))
 def main(node_id, config):
+    os.makedirs(node_id, exist_ok=True)
     configure_logger(node_id)
     raft_node = Node(node_id, config)
     raft_node.run()
