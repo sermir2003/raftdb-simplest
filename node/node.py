@@ -60,11 +60,12 @@ class Node:
             config = json.load(file)
         self.addresses: dict[str, str] = config['addresses']
         self.network_timeout: float = config['network_timeout']
-        self.relieved_read: bool = config['relieved_read']
-        self.client_request_timeout: float = config['client_request_timeout']
+        self.leader_heart_rate: float = config['leader_heart_rate']
+        self.heartbeat_loss_threshold: float = config['heartbeat_loss_threshold']
         self.election_delay_lower: float = config['election_delay_lower']
         self.election_delay_upper: float = config['election_delay_upper']
-        self.leader_heart_rate: float = config['leader_heart_rate']
+        self.relieved_read: bool = config['relieved_read']
+        self.client_request_timeout: float = config['client_request_timeout']
 
         self.commit_length: int = 0
         self.current_role: NodeRole = NodeRole.FOLLOWER
@@ -215,6 +216,8 @@ class Node:
             return {'status': 'the operation request timeout has expired on the server'}
 
     def commit_log_on_leader(self):
+        logger.info('leader is considering whether to commit the recordings')
+        cnt_committed = 0
         while self.commit_length < len(self.log):
             cnt_acks = 0
             for node_id in self.addresses.keys():
@@ -223,11 +226,14 @@ class Node:
             if cnt_acks >= len(self.addresses) // 2 + 1:
                 operation = self.log[self.commit_length]['operation']
                 result = self.storage.apply(operation)
-                logger.info(f'leader applied operation: {operation}, index: {self.commit_length} and received result: {result}')
+                logger.info(f'leader applied operation: {operation}, index: {self.commit_length} '
+                            f'and received result: {result}')
                 if self.commit_length in self.state_of_operation:
                     self.state_of_operation[self.commit_length]['result'] = result
                     self.state_of_operation[self.commit_length]['event'].set()
                 self.commit_length += 1
+                cnt_committed += 1
+        logger.info(f'committed {cnt_committed} new recordings, self.commit_length: {self.commit_length}')
 
     async def async_broadcast(self, requests: list[tuple[str, dict]], method: str):
         logger.info(f'starting {method} broadcast with requests: {requests}')
@@ -270,9 +276,11 @@ class Node:
             delay = random.uniform(self.election_delay_lower, self.election_delay_upper)
             await asyncio.sleep(delay)
             seconds_since_last_heard = (datetime.now() - self.last_heard_from_leader_at).total_seconds()
-            if self.current_role == NodeRole.LEADER or seconds_since_last_heard < 3 * self.leader_heart_rate:
+            if self.current_role == NodeRole.LEADER \
+                    or seconds_since_last_heard < (self.heartbeat_loss_threshold + 1) * self.leader_heart_rate:
                 continue
-            logger.info(f'I suspect the leader is unavailable, trying to become a leader in term {self.current_term + 1}')
+            logger.info('I suspect the leader is unavailable, '
+                        f'trying to become a leader in term {self.current_term + 1}')
             self.current_role = NodeRole.CANDIDATE
             self.current_leader = None
             self.current_term += 1
@@ -408,7 +416,8 @@ class Node:
                 elif self.current_term < term:
                     self.current_term = term
                     self.voted_for = None
-                    logger.info(f'received replicate log response with newer term {term}, become follower of unknown leader')
+                    logger.info(f'received replicate log response with newer term {term}, '
+                                'become follower of unknown leader')
                     self.store_persistent_state()
                     self.current_role = NodeRole.FOLLOWER
 
@@ -460,7 +469,7 @@ class Node:
             else:
                 logger.info(f'append_entries: did not truncate, however it is long; log: {self.log}')
         else:
-            logger.info(f'append_entries: self.log is not longer log_length or len(entries) equals zero')
+            logger.info('append_entries: self.log is not longer log_length or len(entries) equals zero')
         if len(self.log) < log_length + len(entries):
             self.log += entries[len(self.log) - log_length:]
             logger.info(f'append_entries: appended entries; log: {self.log}')
