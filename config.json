@@ -4,7 +4,7 @@
         "node-2": "node-2:5000",
         "node-3": "node-3:5000"
     },
-    "network_timeout": 0.05,
+    "network_timeout": 0.1,
     "leader_heart_rate": 0.5,
     "heartbeat_loss_threshold": 3,
     "election_delay_lower": 1,

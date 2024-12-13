@@ -76,29 +76,42 @@ Mostly for debug
 
 ## Симуляция сетевых проблем
 
-```bash
-# Получите id виртуального сетевого интерфейса docker сети raft_network
-docker network ls | grep raft_network
-# Положите его в переменную окружения
-export raft_network_id=...
+После того как мы создали bridge сеть raft_network, в системе появился виртуальный сетевой интерфейс, узнать id которого можно с помощью `docker network ls | grep raft_network`. Однако применение traffic control к данному адаптору успеха не приносит. По-видимому docker обходит правила qdisc локальной сети, и к пакетам, движущимся между узлами внутри docker сети, эти правила не применяются. И всё же запомните id сети raft_network и положите его в переменную окружения `export raft_network_id=...`.
 
-# Создайте сетевые проблемы
+Самый простой работающий способ, который нашёл я, заключается в применении qdisc правил к каждому veth-интерфейсу в отдельности. Чтобы найти имена veth-интерфейсов, присоединённых к вашим контейнерам, введите `ip link | grep "veth.*br-26c437493d2a"`. Запомните идентификаторы вида `vethba58f9b` (до чего-то вроде `@if9`), именно их следует использовать в командах `tc`, например, `sudo tc qdisc add dev vethba58f9b root netem loss 33%`.
+
+Вы можете создавать разные проблемы на разных интерфейсах, но я предлагаю вам сложить их в один массив и применять команды в цикле:
+
+```bash
+veths=("vethba58f9b" "veth0b69d32" "veth3858fcc" "veth0806c3b")
+for item in "${veths[@]}"; do
+    sudo tc qdisc add dev $item root netem loss 33%
+done
+```
+
+С помощью `tc` вы можете создавать различные сетевые проблемы:
+
+```bash
 # loss in 33% cases
-sudo tc qdisc add dev br-$raft_network_id root netem loss 33%
+sudo tc qdisc add dev $item root netem loss 33%
 # duplicate in 50% cases
-sudo tc qdisc add dev br-$raft_network_id root netem duplicate 50%
+sudo tc qdisc add dev $item root netem duplicate 50%
 # add 30ms as base delay and random jitter (variation in latency) of up to 25ms
-sudo tc qdisc add dev br-$raft_network_id root netem delay 30ms 25ms
+sudo tc qdisc add dev $item root netem delay 30ms 25ms
 # reorder 25% packages by adding to their delay 10ms, consecutive packets are reordered in 50% cases
-sudo tc qdisc add dev br-$raft_network_id root netem delay 10ms reorder 25% 50%
+sudo tc qdisc add dev $item root netem delay 10ms reorder 25% 50%
 # or any combination
-sudo tc qdisc add dev br-$raft_network_id root netem delay 30ms 25ms loss 33% duplicate 5% reorder 25% 50%
+sudo tc qdisc add dev $item root netem delay 30ms 25ms loss 33% duplicate 5% reorder 25% 50%
 # This applies:
 #   30ms base latency with 25ms jitter
 #    33% packet loss
 #    5% packet duplication
 #    25% packet reordering with a 50% correlation
+```
 
+Чтобы отменить все сетевые проблемы
+
+```bash
 # Отмените сетевые проблемы
-sudo tc qdisc del dev br-$raft_network_id root
+sudo tc qdisc del dev $item root
 ```

@@ -233,6 +233,8 @@ class Node:
                     self.state_of_operation[self.commit_length]['event'].set()
                 self.commit_length += 1
                 cnt_committed += 1
+            else:
+                break
         logger.info(f'committed {cnt_committed} new recordings, self.commit_length: {self.commit_length}')
 
     async def async_broadcast(self, requests: list[tuple[str, dict]], method: str):
@@ -322,7 +324,7 @@ class Node:
 
     async def raft_vote_request(self, request: fastapi.Request):
         message = await request.json()
-        logger.info(f'raft/vote request received, message: {message}')
+        logger.info(f'raft/vote request received from {request.client.host}, message: {message}')
         other_id = message['node_id']
         other_term = message['term']
         other_log_length = message['log_length']
@@ -423,7 +425,7 @@ class Node:
 
     async def raft_replicate_request(self, request: fastapi.Request):
         message = await request.json()
-        logger.info(f'raft/replicate request received, message: {message}')
+        logger.info(f'raft/replicate request received from {request.client.host}, message: {message}')
         leader_id = message['node_id']
         term = message['term']
         log_length = message['log_length']
