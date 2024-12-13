@@ -92,11 +92,11 @@ sudo tc qdisc add dev br-$raft_network_id root netem delay 30ms 25ms
 # reorder 25% packages by adding to their delay 10ms, consecutive packets are reordered in 50% cases
 sudo tc qdisc add dev br-$raft_network_id root netem delay 10ms reorder 25% 50%
 # or any combination
-sudo tc qdisc add dev br-$raft_network_id root netem delay 30ms 25ms loss 33% duplicate 50% reorder 25% 50%
+sudo tc qdisc add dev br-$raft_network_id root netem delay 30ms 25ms loss 33% duplicate 5% reorder 25% 50%
 # This applies:
 #   30ms base latency with 25ms jitter
 #    33% packet loss
-#    50% packet duplication
+#    5% packet duplication
 #    25% packet reordering with a 50% correlation
 
 # Отмените сетевые проблемы
