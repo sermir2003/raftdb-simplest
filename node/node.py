@@ -5,12 +5,21 @@ from datetime import datetime
 import random
 import hashlib
 from enum import Enum
+from contextlib import contextmanager
 import asyncio
 import fastapi
 import httpx
 import uvicorn
 from .logger import logger
 from .storage import Storage
+
+
+@contextmanager
+def on_exit_context(message):
+    try:
+        yield
+    finally:
+        logger.info(message)
 
 
 class NodeRole(Enum):
@@ -319,6 +328,7 @@ class Node:
                     self.store_persistent_state()
                     logger.info(f'received vote response with newer {term}, become follower of unknown leader')
                     self.current_role = NodeRole.FOLLOWER
+                    self.current_leader = None
                 else:
                     logger.info(f'received a garbage message as a vote response: {response}')
 
@@ -340,6 +350,7 @@ class Node:
             self.voted_for = other_id
             self.store_persistent_state()
             self.current_role = NodeRole.FOLLOWER
+            self.current_leader = None
             granted = True
         else:
             logger.info('decided to reject the vote request: '
@@ -369,59 +380,62 @@ class Node:
             await self.perform_replication()
 
     async def perform_replication(self):
-        async with self.perform_replication_lock:
-            if self.current_role != NodeRole.LEADER:
-                return
-            requests = []
-            for node_id, node_address in self.addresses.items():
-                if node_id == self.node_id:
-                    continue
-                i = self.sent_length[node_id]
-                entries = self.log[i:]
-                log_term = self.log[i - 1]['term'] if i > 0 else 0
-                message = {
-                    'node_id': self.node_id,
-                    'term': self.current_term,
-                    'log_length': i,
-                    'log_term': log_term,
-                    'leader_commit': self.commit_length,
-                    'entries': entries,
-                }
-                requests.append((node_address, message))
-            responses, _ = await self.async_broadcast(requests, 'replicate')
-            for response in responses:
-                follower_id = response['node_id']
-                term = response['term']
-                ack = response['ack']
-                success = response['success']
-                if term == self.current_term and self.current_role == NodeRole.LEADER:
-                    if success:  # do I need (and ack >= self.acked_length[follower_id]) here?
-                        logger.info(f'received positive replicate log response from {follower_id} with ack: {ack}; '
-                                    f'previous follower sent_length: {self.sent_length[follower_id]}, '
-                                    f'previous follower acked_length: { self.acked_length[follower_id]}')
-                        assert ack >= self.acked_length[follower_id]
-                        self.sent_length[follower_id] = ack
-                        self.acked_length[follower_id] = ack
-                        self.commit_log_on_leader()
-                    elif self.sent_length[follower_id] > 0:
-                        logger.info(f'received negative replicate log response from {follower_id}, '
-                                    'decrementing sent_length; '
-                                    f'previous follower sent_length: {self.sent_length[follower_id]}, '
-                                    f'previous follower acked_length: { self.acked_length[follower_id]}')
-                        self.sent_length[follower_id] -= 1
-                        asyncio.create_task(self.perform_replication())
-                    else:
-                        logger.info(f'received negative replicate log response from {follower_id}, '
-                                    'but its sent_length is already zero; '
-                                    f'follower sent_length: {self.sent_length[follower_id]}, '
-                                    f'follower acked_length: { self.acked_length[follower_id]}')
-                elif self.current_term < term:
-                    self.current_term = term
-                    self.voted_for = None
-                    logger.info(f'received replicate log response with newer term {term}, '
-                                'become follower of unknown leader')
-                    self.store_persistent_state()
-                    self.current_role = NodeRole.FOLLOWER
+        with on_exit_context('Unlock perform_replication_lock'):
+            async with self.perform_replication_lock:
+                logger.info('Lock perform_replication_lock')
+                if self.current_role != NodeRole.LEADER:
+                    return
+                requests = []
+                for node_id, node_address in self.addresses.items():
+                    if node_id == self.node_id:
+                        continue
+                    i = self.sent_length[node_id]
+                    entries = self.log[i:]
+                    log_term = self.log[i - 1]['term'] if i > 0 else 0
+                    message = {
+                        'node_id': self.node_id,
+                        'term': self.current_term,
+                        'log_length': i,
+                        'log_term': log_term,
+                        'leader_commit': self.commit_length,
+                        'entries': entries,
+                    }
+                    requests.append((node_address, message))
+                responses, _ = await self.async_broadcast(requests, 'replicate')
+                for response in responses:
+                    follower_id = response['node_id']
+                    term = response['term']
+                    ack = response['ack']
+                    success = response['success']
+                    if term == self.current_term and self.current_role == NodeRole.LEADER:
+                        if success:  # do I need (and ack >= self.acked_length[follower_id]) here?
+                            logger.info(f'received positive replicate log response from {follower_id} with ack: {ack}; '
+                                        f'previous follower sent_length: {self.sent_length[follower_id]}, '
+                                        f'previous follower acked_length: { self.acked_length[follower_id]}')
+                            assert ack >= self.acked_length[follower_id]
+                            self.sent_length[follower_id] = ack
+                            self.acked_length[follower_id] = ack
+                            self.commit_log_on_leader()
+                        elif self.sent_length[follower_id] > 0:
+                            logger.info(f'received negative replicate log response from {follower_id}, '
+                                        'decrementing sent_length; '
+                                        f'previous follower sent_length: {self.sent_length[follower_id]}, '
+                                        f'previous follower acked_length: { self.acked_length[follower_id]}')
+                            self.sent_length[follower_id] -= 1
+                            asyncio.create_task(self.perform_replication())
+                        else:
+                            logger.info(f'received negative replicate log response from {follower_id}, '
+                                        'but its sent_length is already zero; '
+                                        f'follower sent_length: {self.sent_length[follower_id]}, '
+                                        f'follower acked_length: { self.acked_length[follower_id]}')
+                    elif self.current_term < term:
+                        self.current_term = term
+                        self.voted_for = None
+                        logger.info(f'received replicate log response with newer term {term}, '
+                                    'become follower of unknown leader')
+                        self.store_persistent_state()
+                        self.current_role = NodeRole.FOLLOWER
+                        self.current_leader = None
 
     async def raft_replicate_request(self, request: fastapi.Request):
         message = await request.json()
@@ -439,10 +453,11 @@ class Node:
             self.current_role = NodeRole.FOLLOWER
             self.current_leader = leader_id
             logger.info(f'became a follower of {leader_id} in term {term}')
-        if self.current_term == term:
+        elif self.current_term == term:
             self.current_role = NodeRole.FOLLOWER
+            prev_leader = leader_id
             self.current_leader = leader_id
-            logger.info(f'became a follower of {leader_id} in term {term}')
+            logger.info(f'confirmed followerness of {leader_id} in term {term}, prev_leader: {prev_leader}')
         if self.current_term == term and self.current_leader == leader_id:
             self.last_heard_from_leader_at = datetime.now()
             logger.info(f'reset last_heard_from_leader_at to {self.last_heard_from_leader_at}')
